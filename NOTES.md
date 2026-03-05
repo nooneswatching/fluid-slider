@@ -52,6 +52,14 @@ On drag start, `.dragging` is added to the track, triggering `clip-path: inset(4
 
 Image containers are 120% wide with `overflow: hidden`. During transitions, `onUpdate` applies an inverse translateX offset to each image (`PARALLAX_FACTOR = 0.18`). Driven entirely by JS — no CSS transition on images.
 
+### Text mask tracking
+
+During drag, `.slide-text` translates right by `--drag-mask-px` (= `slideWidth × DRAG_MASK_INSET%`), keeping the text visually anchored to the left edge of the clip-path mask. Entry transition: 150ms ease-in (matches mask). Exit: 600ms fluid ease-out (matches mask release).
+
+### Velocity-driven slide trail
+
+During drag, all non-active slides receive a per-slide `translateX` offset proportional to their distance from `currentIndex` and the current pointer velocity: `offset = velocity × TRAIL_INERTIA × distance`. Slides only ever trail *away* from the active slide (directional clamp via `Math.max/min(0, …)`) to prevent overlap. On release, trail offsets animate to 0 using the same `dur` + `power4.out` as the snap tween — no separate stagger.
+
 ### Navigation
 
 - **Arrows** — centered on the grid edge. Duplicate-arrow slide animation on hover.
@@ -68,6 +76,7 @@ const GAP             = 8;    // px — matches grid gutter
 const PARALLAX_FACTOR = 0.18; // image parallax intensity
 const TRANSITION_DUR  = 0.6;  // arrow/dot nav duration (s)
 const DRAG_MASK_INSET = 4;    // % — clip-path inset depth while dragging
+const TRAIL_INERTIA   = 40;   // ms — neighbor trail offset = velocity (px/ms) × this value
 ```
 
 ## Slide content
