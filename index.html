@@ -54,7 +54,6 @@
     .slider-track {
       display: flex;
       gap: var(--grid-gutter, 8px);
-      transition: transform 0.6s cubic-bezier(0.25, 0.1, 0.25, 1);
       will-change: transform;
       cursor: grab;
     }
@@ -68,25 +67,11 @@
       pointer-events: none;
     }
 
-    .slider-track.dragging {
-      transition: none;
-    }
-
-    .slider-track.dragging .slide {
-      transition: none;
-    }
-
     .slider-track.dragging .slide-text,
     .slider-track.dragging .slide-inner::before {
       transition: none;
     }
 
-    .slider-track.no-transition,
-    .slider-track.no-transition .slide,
-    .slider-track.no-transition .slide-text,
-    .slider-track.no-transition .slide-inner::before {
-      transition: none !important;
-    }
 
     /* ============================================
        SLIDE
@@ -94,12 +79,6 @@
     .slide {
       flex: 0 0 var(--slide-width, 80vw);
       width: var(--slide-width, 80vw);
-      opacity: 0.3;
-      transition: opacity 0.6s ease;
-    }
-
-    .slide.active {
-      opacity: 1;
     }
 
     .slide-inner {
@@ -107,12 +86,18 @@
       border-radius: 16px;
       overflow: hidden;
       aspect-ratio: 16 / 9;
+      clip-path: inset(0% round 16px);
+      transition: clip-path 600ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .slider-track.dragging .slide-inner {
+      clip-path: inset(var(--drag-mask-inset, 10%) round 16px);
+      transition: clip-path 150ms cubic-bezier(0.4, 0, 0.6, 1);
     }
 
     /* ============================================
        SLIDE TEXT (overlaid on image)
        ============================================ */
-    /* Full-image scrim — covers the entire slide, fades with the active state */
     .slide-inner::before {
       content: '';
       position: absolute;
@@ -125,13 +110,6 @@
         rgba(0, 0, 0, 0.4) 50%,
         rgba(0, 0, 0, 0.05) 100%
       );
-      opacity: 0;
-      transition: opacity 0.2s ease;
-    }
-
-    .slide.active .slide-inner::before {
-      opacity: 1;
-      transition: opacity 0.35s ease 0.25s;
     }
 
     .slide-text {
@@ -146,13 +124,6 @@
       flex-direction: column;
       justify-content: center;
       gap: 24px;
-      opacity: 0;
-      transition: opacity 0.2s ease;
-    }
-
-    .slide.active .slide-text {
-      opacity: 1;
-      transition: opacity 0.35s ease 0.25s;
     }
 
     .slide-quote {
@@ -568,9 +539,11 @@ Try Illustrator
     </div>
   </section>
 
+  <script src="vendor/gsap.min.js"></script>
+
   <script>
     /* ============================================
-       GRID OVERLAY
+       GRID OVERLAY — runs immediately, no GSAP dep
        ============================================ */
     const overlay = document.getElementById('gridOverlay');
 
@@ -594,15 +567,17 @@ Try Illustrator
       document.getElementById('bpIndicator').textContent = label;
     }
 
+    buildOverlay();
+    updateBP();
+
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'g' || e.key === 'G') {
-        overlay.classList.toggle('visible');
-      }
+      if (e.key === 'g' || e.key === 'G') overlay.classList.toggle('visible');
     });
 
     /* ============================================
-       SLIDER ENGINE (infinite loop)
+       SLIDER ENGINE — GSAP core only
        ============================================ */
+    const sliderSection = document.querySelector('.slider-section');
     const track = document.getElementById('sliderTrack');
     const prevBtn = document.getElementById('sliderPrev');
     const nextBtn = document.getElementById('sliderNext');
@@ -610,401 +585,260 @@ Try Illustrator
     const dots = dotsContainer.querySelectorAll('.slider-dot');
     const gridRef = document.getElementById('gridRef');
 
-    const REAL_COUNT = 3;
-    const GAP = 8;
-    const PARALLAX_FACTOR = 0.18;
-    const TRANSITION_MS = 600;
+    // Hide slider immediately — prevents FOUC before layout is computed
+    gsap.set(sliderSection, { autoAlpha: 0 });
 
-    /* --- Clone first & last slides for seamless wrap --- */
+    const REAL_COUNT       = 3;
+    const CLONE_COUNT      = 3;     // buffer clones on each end (outermost is unreachable safety buffer)
+    const GAP              = 8;
+    const PARALLAX_FACTOR  = 0.18;
+    const TRANSITION_DUR   = 0.6;   // arrow/dot navigation duration (s)
+    const DRAG_MASK_INSET  = 4;     // percent — inset on all sides when dragging
+
+    // Real slides occupy indices CLONE_COUNT … CLONE_COUNT+REAL_COUNT-1
+    // Prepended clones: last CLONE_COUNT real slides (in order)
+    // Appended clones:  first CLONE_COUNT real slides (in order)
+    const TOTAL = REAL_COUNT + CLONE_COUNT * 2;
+
+    /* --- Clone slides for seamless loop --- */
     const origSlides = Array.from(track.querySelectorAll('.slide'));
-    const firstClone = origSlides[0].cloneNode(true);
-    const lastClone = origSlides[origSlides.length - 1].cloneNode(true);
-    firstClone.setAttribute('aria-hidden', 'true');
-    lastClone.setAttribute('aria-hidden', 'true');
 
-    // Ensure all carousel images are fetched before interaction so adjacent
-    // slides are already painted (prevents image pop/blink during movement).
-    const forceEagerImages = (root) => {
-      root.querySelectorAll('img').forEach((img) => {
-        img.loading = 'eager';
-        img.decoding = 'async';
-      });
-    };
-    forceEagerImages(track);
-    forceEagerImages(firstClone);
-    forceEagerImages(lastClone);
+    const forceEager = (root) =>
+      root.querySelectorAll('img').forEach(img => { img.loading = 'eager'; img.decoding = 'async'; });
+    forceEager(track);
 
-    track.appendChild(firstClone);
-    track.insertBefore(lastClone, track.firstChild);
+    // Prepend: insert real[REAL_COUNT-1] then real[REAL_COUNT-2] … (each goes to front)
+    for (let i = 0; i < CLONE_COUNT; i++) {
+      const clone = origSlides[REAL_COUNT - 1 - i].cloneNode(true);
+      clone.setAttribute('aria-hidden', 'true');
+      forceEager(clone);
+      track.insertBefore(clone, track.firstChild);
+    }
+    // Append: real[0], real[1] …
+    for (let i = 0; i < CLONE_COUNT; i++) {
+      const clone = origSlides[i].cloneNode(true);
+      clone.setAttribute('aria-hidden', 'true');
+      forceEager(clone);
+      track.appendChild(clone);
+    }
 
-    // Re-query after cloning
     const allSlides = track.querySelectorAll('.slide');
     const allImages = track.querySelectorAll('.slide-image-wrap img');
 
-    // Track index: 0=clone-last, 1..REAL_COUNT=real slides, REAL_COUNT+1=clone-first
-    let currentIndex = 1;
-    let slideWidth = 0;
+    let currentIndex   = CLONE_COUNT; // start on first real slide
+    let slideWidth     = 0;
     let gridLeftOffset = 0;
-    let isAnimating = false;
-    let isJumping = false;
-    let animationTimeout = null;
 
-    function finishSlideMotion() {
-      if (!isAnimating) return;
-      isAnimating = false;
-      if (animationTimeout) {
-        clearTimeout(animationTimeout);
-        animationTimeout = null;
-      }
-      // If we animated onto a boundary clone, jump to the paired real slide.
-      if (currentIndex === 0) {
-        jumpToIndexWithoutAnimation(REAL_COUNT);
-      } else if (currentIndex === REAL_COUNT + 1) {
-        jumpToIndexWithoutAnimation(1);
-      }
-      updateDots();
-      updateParallax(getTrackX(currentIndex));
-    }
-
-    function jumpToIndexWithoutAnimation(index) {
-      isJumping = true;
-      track.classList.add('no-transition');
-      currentIndex = index;
-      track.style.transform = `translateX(${getTrackX(currentIndex)}px)`;
-      updateSlideOpacity();
-      updateParallax(getTrackX(currentIndex));
-      void track.offsetWidth;
-      track.classList.remove('no-transition');
-      isJumping = false;
-    }
-
-    /* --- Layout computation --- */
-    function computeLayout() {
-      const rect = gridRef.getBoundingClientRect();
-      const style = getComputedStyle(gridRef);
-      const padL = parseFloat(style.paddingLeft);
-      const padR = parseFloat(style.paddingRight);
-
-      slideWidth = rect.width - padL - padR;
-      gridLeftOffset = rect.left + padL;
-
-      // Apply width to ALL slides (including clones)
-      allSlides.forEach(s => s.style.flex = `0 0 ${slideWidth}px`);
-
-      // Position arrow buttons centered on the grid edge
-      const btnHalf = 24;
-      prevBtn.style.left = `${gridLeftOffset - btnHalf}px`;
-      nextBtn.style.right = `${window.innerWidth - (gridLeftOffset + slideWidth) - btnHalf}px`;
-
-      // Position dots centered on the slide, inset from bottom edge
-      const isMobile = window.innerWidth < 768;
-      const sectionPadBottom = isMobile ? 36 : 60;
-      const dotsInset = isMobile ? 16 : 24;
-      const slideCenter = gridLeftOffset + slideWidth / 2;
-      dotsContainer.style.left = `${slideCenter}px`;
-      dotsContainer.style.transform = 'translateX(-50%)';
-      dotsContainer.style.bottom = `${sectionPadBottom + dotsInset}px`;
-
-      // Update track position (no animation)
-      positionTrack(false);
-      updateSlideOpacity();
-    }
-
-    /* --- Track positioning --- */
-    function getTrackX(index) {
-      return gridLeftOffset - index * (slideWidth + GAP);
-    }
-
-    function positionTrack(animate) {
-      if (!animate) {
-        track.classList.add('dragging');
-      }
-      track.style.transform = `translateX(${getTrackX(currentIndex)}px)`;
-      if (!animate) {
-        track.offsetHeight; // force reflow
-        track.classList.remove('dragging');
-      }
-    }
-
-    /* --- Slide opacity --- */
-    function updateSlideOpacity() {
-      allSlides.forEach((s, i) => {
-        s.classList.toggle('active', i === currentIndex);
-      });
-    }
+    /* --- Coords --- */
+    function getTrackX(index) { return gridLeftOffset - index * (slideWidth + GAP); }
+    function getLiveX()       { return gsap.getProperty(track, 'x'); }
 
     /* --- Parallax --- */
     function updateParallax(trackX) {
       allImages.forEach((img, i) => {
-        const slideLeft = trackX + i * (slideWidth + GAP);
-        const offset = slideLeft - gridLeftOffset;
-        const px = (offset / slideWidth) * slideWidth * PARALLAX_FACTOR;
-        img.style.transform = `translateX(${-px}px)`;
+        const offset = (trackX + i * (slideWidth + GAP)) - gridLeftOffset;
+        gsap.set(img, { x: -(offset / slideWidth) * slideWidth * PARALLAX_FACTOR });
       });
     }
 
-    function getCurrentTransformX() {
-      const matrix = getComputedStyle(track).transform;
-      if (!matrix || matrix === 'none') return getTrackX(currentIndex);
-      const values = matrix.match(/matrix.*\((.+)\)/);
-      if (!values) return getTrackX(currentIndex);
-      const parts = values[1].split(',').map((part) => part.trim());
-      return parseFloat(parts[4]);
+    /* --- Active & dots --- */
+    function updateActive(idx) {
+      idx = (idx !== undefined) ? idx : currentIndex;
+      allSlides.forEach((s, i) => s.classList.toggle('active', i === idx));
+    }
+    function getRealIndex(idx) {
+      idx = (idx !== undefined) ? idx : currentIndex;
+      return ((idx - CLONE_COUNT) % REAL_COUNT + REAL_COUNT) % REAL_COUNT;
+    }
+    function updateDots(idx) {
+      const real = getRealIndex(idx);
+      dots.forEach((d, i) => d.classList.toggle('active', i === real));
     }
 
-    function animateParallax() {
-      const currentX = getCurrentTransformX();
-      updateParallax(currentX);
-      if (isAnimating) {
-        requestAnimationFrame(animateParallax);
-      }
-    }
-
-    /* --- Real index (0-based) for dots --- */
-    function getRealIndex() {
-      if (currentIndex === 0) return REAL_COUNT - 1;
-      if (currentIndex === REAL_COUNT + 1) return 0;
-      return currentIndex - 1;
-    }
-
-    /* --- Update dots --- */
-    function updateDots() {
-      const real = getRealIndex();
-      dots.forEach((dot, i) => {
-        dot.classList.toggle('active', i === real);
-      });
-    }
-
-    // If interaction starts on a clone, remap to the paired real slide first.
-    function normalizeLoopIndex(index) {
-      if (index <= 0) return REAL_COUNT;
-      if (index >= REAL_COUNT + 1) return 1;
-      return index;
-    }
-
-    /* --- Go to slide --- */
-    function goToSlide(index) {
-      if (isJumping) return;
-
-      // Clamp to valid track indices — prevents rapid clicks from going past
-      // the clone slides into non-existent positions, which would cause all
-      // slides to lose their .active class (the "blink" bug).
-      index = Math.max(0, Math.min(REAL_COUNT + 1, index));
-
-      if (index === currentIndex) return;
-
-      // Cancel any pending boundary check from a previous animation so stale
-      // timeouts don't fire checkBoundary with the wrong currentIndex.
-      clearTimeout(animationTimeout);
-      animationTimeout = null;
+    /* --- Silent loop jump (suppresses text/scrim transitions) --- */
+    function jumpTo(index) {
+      track.classList.add('jumping');
       currentIndex = index;
-      track.style.transform = `translateX(${getTrackX(currentIndex)}px)`;
-      updateSlideOpacity();
-      updateDots();
-
-      // Animate parallax during transition
-      isAnimating = true;
-      requestAnimationFrame(animateParallax);
-      // Fallback in case transitionend is missed (e.g. interrupted transition).
-      animationTimeout = setTimeout(finishSlideMotion, TRANSITION_MS + 100);
+      gsap.set(track, { x: getTrackX(index) });
+      updateActive();
+      updateParallax(getTrackX(index));
+      // Double rAF: let browser apply the jump before re-enabling transitions
+      requestAnimationFrame(() => requestAnimationFrame(() => track.classList.remove('jumping')));
     }
 
-    /* --- Button events --- */
-    track.addEventListener('transitionend', (e) => {
-      if (e.propertyName !== 'transform') return;
-      finishSlideMotion();
-    });
+    function boundaryJump() {
+      if      (currentIndex < CLONE_COUNT)              jumpTo(currentIndex + REAL_COUNT);
+      else if (currentIndex >= CLONE_COUNT + REAL_COUNT) jumpTo(currentIndex - REAL_COUNT);
+    }
 
-    prevBtn.addEventListener('click', () => goToSlide(currentIndex - 1));
-    nextBtn.addEventListener('click', () => goToSlide(currentIndex + 1));
-
-    dots.forEach(dot => {
-      dot.addEventListener('click', () => {
-        const realTarget = parseInt(dot.dataset.index, 10);
-        goToSlide(realTarget + 1); // +1 because index 0 is clone
+    /* --- Animated navigation (arrows / dots) --- */
+    function goToSlide(index) {
+      // Allow one adjacent clone on each side for the wrap animation
+      index = Math.max(CLONE_COUNT - 1, Math.min(CLONE_COUNT + REAL_COUNT, index));
+      if (index === currentIndex) return;
+      gsap.killTweensOf(track);
+      currentIndex = index;
+      updateDots();
+      gsap.to(track, {
+        x: getTrackX(index),
+        duration: TRANSITION_DUR,
+        ease: 'power3.out',
+        onUpdate:   () => updateParallax(getLiveX()),
+        onComplete: () => { boundaryJump(); updateDots(); }
       });
-    });
+    }
 
-    /* --- Touch / Swipe --- */
-    let touchStartX = 0;
-    let touchStartY = 0;
-    let touchStartTime = 0;
-    let touchDeltaX = 0;
-    let touchBaseX = 0;
-    let isSwiping = false;
-    let isScrolling = null;
+    /* --- Layout --- */
+    function computeLayout() {
+      const rect  = gridRef.getBoundingClientRect();
+      const style = getComputedStyle(gridRef);
+      slideWidth     = rect.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      gridLeftOffset = rect.left  + parseFloat(style.paddingLeft);
+
+      allSlides.forEach(s => { s.style.flex = `0 0 ${slideWidth}px`; s.style.width = `${slideWidth}px`; });
+
+      prevBtn.style.left  = `${gridLeftOffset - 24}px`;
+      nextBtn.style.right = `${window.innerWidth - (gridLeftOffset + slideWidth) - 24}px`;
+
+      const isMobile = window.innerWidth < 768;
+      dotsContainer.style.left      = `${gridLeftOffset + slideWidth / 2}px`;
+      dotsContainer.style.transform = 'translateX(-50%)';
+      dotsContainer.style.bottom    = `${(isMobile ? 36 : 60) + (isMobile ? 16 : 24)}px`;
+
+      gsap.set(track, { x: getTrackX(currentIndex) });
+      updateActive();
+      updateParallax(getTrackX(currentIndex));
+    }
+
+    /* ============================================
+       DRAG — vanilla pointer events, GSAP animation
+       ============================================ */
+    let isDragging    = false;
+    let dragBaseX     = 0;
+    let pointerStartX = 0;
+    let velSamples    = []; // { x, t } pointer samples for velocity calc
+
+    function dragStart(clientX) {
+      gsap.killTweensOf(track);
+
+      // Snap to real slide if interrupted mid-loop-jump
+      dragBaseX = getLiveX();
+      const ni = Math.round((gridLeftOffset - dragBaseX) / (slideWidth + GAP));
+      currentIndex = Math.max(0, Math.min(TOTAL - 1, ni));
+      if (currentIndex < CLONE_COUNT) {
+        const t = currentIndex + REAL_COUNT; jumpTo(t); currentIndex = t;
+      } else if (currentIndex >= CLONE_COUNT + REAL_COUNT) {
+        const t = currentIndex - REAL_COUNT; jumpTo(t); currentIndex = t;
+      }
+      dragBaseX = getLiveX(); // re-read after potential jump
+
+      pointerStartX = clientX;
+      velSamples    = [{ x: clientX, t: performance.now() }];
+      isDragging    = true;
+      track.classList.add('dragging');
+    }
+
+    function dragMove(clientX) {
+      if (!isDragging) return;
+      const dx   = clientX - pointerStartX;
+      // Clamp to inner clones — outermost clone on each end is the unreachable safety buffer
+      const minX = getTrackX(TOTAL - 2);
+      const maxX = getTrackX(1);
+      const newX = Math.max(minX, Math.min(maxX, dragBaseX + dx));
+      gsap.set(track, { x: newX });
+      updateParallax(newX);
+
+      // Keep rolling velocity window
+      const now = performance.now();
+      velSamples.push({ x: clientX, t: now });
+      velSamples = velSamples.filter(s => now - s.t < 100);
+    }
+
+    function dragEnd() {
+      if (!isDragging) return;
+      isDragging = false;
+      track.classList.remove('dragging'); // releases clip-path mask (600ms fluid ease)
+
+      // Velocity in px/ms from recent pointer samples
+      let vx = 0;
+      const now = performance.now();
+      const recent = velSamples.filter(s => now - s.t < 80);
+      if (recent.length >= 2) {
+        const dt = recent[recent.length - 1].t - recent[0].t;
+        if (dt > 0) vx = (recent[recent.length - 1].x - recent[0].x) / dt;
+      }
+
+      // Project velocity to find snap target, then animate with power4.out.
+      // power4.out is strictly monotonic — zero overshoot, always lands exactly on target.
+      const currentX   = getLiveX();
+      const projectedX = currentX + vx * 280;
+      const ni         = Math.round((gridLeftOffset - projectedX) / (slideWidth + GAP));
+      const target     = Math.max(1, Math.min(TOTAL - 2, ni)); // snap stays inside safety buffers
+      const targetX    = getTrackX(target);
+
+      // Duration scales with throw speed so fast flings coast longer
+      const dur = Math.max(0.3, Math.min(1.2, 0.3 + Math.abs(vx) * 0.35));
+
+      currentIndex = target;
+      gsap.killTweensOf(track);
+      gsap.to(track, {
+        x: targetX,
+        duration: dur,
+        ease: 'power4.out',
+        onUpdate:   () => updateParallax(getLiveX()),
+        onComplete: () => { boundaryJump(); updateDots(); }
+      });
+    }
+
+    /* --- Mouse --- */
+    track.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      dragStart(e.clientX);
+    });
+    window.addEventListener('mousemove', (e) => { if (isDragging) dragMove(e.clientX); });
+    window.addEventListener('mouseup',   ()  => dragEnd());
+    track.addEventListener('dragstart',  (e) => e.preventDefault());
+
+    /* --- Touch --- */
+    let touchStartY      = 0;
+    let touchIsScrolling = null;
 
     track.addEventListener('touchstart', (e) => {
-      let currentX = getCurrentTransformX();
-      clearTimeout(animationTimeout);
-      animationTimeout = null;
-      isAnimating = false;
-      track.classList.add('dragging');
-      track.style.transform = `translateX(${currentX}px)`;
-      const nearestIndex = Math.round((gridLeftOffset - currentX) / (slideWidth + GAP));
-      currentIndex = Math.max(0, Math.min(REAL_COUNT + 1, nearestIndex));
-      const normalizedIndex = normalizeLoopIndex(currentIndex);
-      if (normalizedIndex !== currentIndex) {
-        jumpToIndexWithoutAnimation(normalizedIndex);
-        currentIndex = normalizedIndex;
-        currentX = getTrackX(currentIndex);
-        track.classList.add('dragging');
-      }
-      updateSlideOpacity();
-      updateDots();
-      updateParallax(currentX);
-
-      touchStartX = e.touches[0].clientX;
-      touchStartY = e.touches[0].clientY;
-      touchStartTime = Date.now();
-      touchDeltaX = 0;
-      touchBaseX = currentX;
-      isSwiping = true;
-      isScrolling = null;
+      touchStartY      = e.touches[0].clientY;
+      touchIsScrolling = null;
+      dragStart(e.touches[0].clientX);
     }, { passive: true });
 
     track.addEventListener('touchmove', (e) => {
-      if (!isSwiping) return;
-
-      const dx = e.touches[0].clientX - touchStartX;
-      const dy = e.touches[0].clientY - touchStartY;
-
-      if (isScrolling === null) {
-        isScrolling = Math.abs(dy) > Math.abs(dx);
-      }
-      if (isScrolling) return;
-
+      if (!isDragging) return;
+      const dx = Math.abs(e.touches[0].clientX - pointerStartX);
+      const dy = Math.abs(e.touches[0].clientY - touchStartY);
+      if (touchIsScrolling === null) touchIsScrolling = dy > dx;
+      if (touchIsScrolling) { dragEnd(); return; }
       e.preventDefault();
-      touchDeltaX = dx;
-
-      const dragX = touchBaseX + touchDeltaX;
-      track.style.transform = `translateX(${dragX}px)`;
-      updateParallax(dragX);
+      dragMove(e.touches[0].clientX);
     }, { passive: false });
 
-    track.addEventListener('touchend', () => {
-      if (!isSwiping || isScrolling) {
-        isSwiping = false;
-        return;
-      }
-      isSwiping = false;
-      track.classList.remove('dragging');
-      void track.offsetWidth; // commit dragged position as transition start point
+    track.addEventListener('touchend',    () => dragEnd(), { passive: true });
+    track.addEventListener('touchcancel', () => dragEnd(), { passive: true });
 
-      const elapsed = Date.now() - touchStartTime;
-      const velocity = Math.abs(touchDeltaX) / elapsed;
-      const threshold = slideWidth * 0.2;
+    /* --- Buttons & dots --- */
+    prevBtn.addEventListener('click', () => goToSlide(currentIndex - 1));
+    nextBtn.addEventListener('click', () => goToSlide(currentIndex + 1));
+    dots.forEach(dot =>
+      dot.addEventListener('click', () => goToSlide(parseInt(dot.dataset.index, 10) + CLONE_COUNT))
+    );
 
-      if (touchDeltaX > threshold || (touchDeltaX > 40 && velocity > 0.3)) {
-        goToSlide(currentIndex - 1);
-      } else if (touchDeltaX < -threshold || (touchDeltaX < -40 && velocity > 0.3)) {
-        goToSlide(currentIndex + 1);
-      } else {
-        // Snap back
-        track.style.transform = `translateX(${getTrackX(currentIndex)}px)`;
-        isAnimating = true;
-        requestAnimationFrame(animateParallax);
-        setTimeout(() => {
-          isAnimating = false;
-          updateParallax(getTrackX(currentIndex));
-        }, TRANSITION_MS + 50);
-      }
-    }, { passive: true });
-
-    /* --- Mouse drag --- */
-    let mouseDown = false;
-    let mouseStartX = 0;
-    let mouseStartTime = 0;
-    let mouseDeltaX = 0;
-    let mouseBaseX = 0;
-
-    track.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return; // left click only
-      e.preventDefault();
-      let currentX = getCurrentTransformX();
-      clearTimeout(animationTimeout);
-      animationTimeout = null;
-      isAnimating = false;
-      track.classList.add('dragging');
-      track.style.transform = `translateX(${currentX}px)`;
-      const nearestIndex = Math.round((gridLeftOffset - currentX) / (slideWidth + GAP));
-      currentIndex = Math.max(0, Math.min(REAL_COUNT + 1, nearestIndex));
-      const normalizedIndex = normalizeLoopIndex(currentIndex);
-      if (normalizedIndex !== currentIndex) {
-        jumpToIndexWithoutAnimation(normalizedIndex);
-        currentIndex = normalizedIndex;
-        currentX = getTrackX(currentIndex);
-        track.classList.add('dragging');
-      }
-      updateSlideOpacity();
-      updateDots();
-      updateParallax(currentX);
-
-      mouseDown = true;
-      mouseStartX = e.clientX;
-      mouseStartTime = Date.now();
-      mouseDeltaX = 0;
-      mouseBaseX = currentX;
-    });
-
-    window.addEventListener('mousemove', (e) => {
-      if (!mouseDown) return;
-      e.preventDefault();
-      mouseDeltaX = e.clientX - mouseStartX;
-
-      const dragX = mouseBaseX + mouseDeltaX;
-      track.style.transform = `translateX(${dragX}px)`;
-      updateParallax(dragX);
-    });
-
-    window.addEventListener('mouseup', () => {
-      if (!mouseDown) return;
-      mouseDown = false;
-      track.classList.remove('dragging');
-      void track.offsetWidth; // commit dragged position as transition start point
-
-      const elapsed = Date.now() - mouseStartTime;
-      const velocity = Math.abs(mouseDeltaX) / elapsed;
-      const threshold = slideWidth * 0.15;
-
-      if (mouseDeltaX > threshold || (mouseDeltaX > 30 && velocity > 0.3)) {
-        goToSlide(currentIndex - 1);
-      } else if (mouseDeltaX < -threshold || (mouseDeltaX < -30 && velocity > 0.3)) {
-        goToSlide(currentIndex + 1);
-      } else {
-        // Snap back
-        track.style.transform = `translateX(${getTrackX(currentIndex)}px)`;
-        isAnimating = true;
-        requestAnimationFrame(animateParallax);
-        setTimeout(() => {
-          isAnimating = false;
-          updateParallax(getTrackX(currentIndex));
-        }, TRANSITION_MS + 50);
-      }
-    });
-
-    // Prevent drag ghost images
-    track.addEventListener('dragstart', (e) => e.preventDefault());
-
-    /* --- Resize (live) --- */
-    function onResize() {
-      buildOverlay();
-      updateBP();
-      computeLayout();
-      updateParallax(getTrackX(currentIndex));
-    }
+    /* --- Resize --- */
+    window.addEventListener('resize', () => { buildOverlay(); updateBP(); computeLayout(); });
 
     /* --- Init --- */
-    function init() {
-      buildOverlay();
-      updateBP();
-      computeLayout();
-      updateDots();
-      updateParallax(getTrackX(currentIndex));
-    }
-
-    window.addEventListener('resize', onResize);
-    init();
+    document.documentElement.style.setProperty('--drag-mask-inset', DRAG_MASK_INSET + '%');
+    computeLayout();
+    updateDots();
+    // Reveal slider now that layout is set — no FOUC
+    gsap.to(sliderSection, { autoAlpha: 1, duration: 0.4, ease: 'power2.out' });
   </script>
 </body>
 </html>

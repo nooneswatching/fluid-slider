@@ -1,55 +1,79 @@
-# Fluid Slider Prototype
+# Fluid Slider
 
-## Overview
-Full-width carousel component for ACOM. Each slide is a 16:9 card with a full-bleed image, overlaid quote text, attribution, and CTA button. Slides are sized to match the shared grid system and support infinite looping, parallax, mouse drag, and touch swipe.
+Full-width carousel for ACOM. Each slide is a 16:9 card with a full-bleed image, overlaid quote text, attribution, and CTA button. Supports infinite looping, parallax, fluid drag masking, mouse drag, and touch swipe.
+
+## File structure
+
+```
+index.html          — everything (HTML, CSS, JS)
+styles/
+  reset.css         — browser reset
+  grid.css          — ACOM grid system (breakpoints, columns, margins, overlay)
+assets/
+  Fonts/            — Adobe Clean Display (Regular, Bold, Black)
+  images/           — slide images (desktop + mobile @sm variants)
+vendor/
+  gsap.min.js       — GSAP 3 (animation engine)
+```
 
 ## Dependencies
-- `../global/styles/reset.css`
-- `../global/styles/grid.css` — defines breakpoints, columns, margins, and gutter
-- `../assets/Fonts/AdobeCleanDisplay-{Regular,Bold,Black}.otf`
 
-## Grid Alignment
-Slide width is computed from the `.grid` container's content-box (viewport width minus grid margins, capped at 1920px). A hidden `.grid` reference element is measured via JS on every resize — no debounce, so the slide tracks the grid 1:1 in real time. Toggle the grid overlay with the **G** key to verify alignment.
+- **GSAP 3** (`vendor/gsap.min.js`) — tweening and `gsap.set` / `gsap.getProperty`
+- **Adobe Clean Display** — Regular (400), Bold (700), Black (900)
+- No build step, no npm, no bundler — open `index.html` directly
 
-### Breakpoints
-| Name | Range | Columns | Margin |
-|------|-------|---------|--------|
-| XS | < 768px | 6 | 24px |
-| S | 768–1023px | 6 | 24px |
+## Grid alignment
+
+Slide width is computed from the `.grid` container's content-box (viewport minus margins, capped at 1920px). A hidden `.grid-ref` element is measured via JS on every resize. Toggle the grid overlay with **G** to verify alignment.
+
+| Breakpoint | Range | Columns | Margin |
+|---|---|---|---|
+| XS | < 768px | 6 | 24px fixed |
+| S | 768–1023px | 6 | 24px fixed |
 | M | 1024–1279px | 12 | 8.333% |
 | L | 1280–1440px | 12 | 8.333% |
 | XL | > 1440px | 12 | 8.333% (max 1920px) |
 
 ## Architecture
 
-### Infinite Loop
-The first and last slides are cloned and appended/prepended to the track. After a transition lands on a clone, the track instantly jumps to the corresponding real slide with all transitions disabled (`.dragging` class on the track suppresses both track transform and slide opacity transitions to prevent flash).
+### Infinite loop
+
+`CLONE_COUNT = 3` clones are prepended and appended to the track. The outermost clone on each side is an unreachable safety buffer — drag and snap are hard-clamped one step inside it. When a throw settles on any clone, `boundaryJump()` instantly teleports to the corresponding real slide.
+
+### Drag & snap
+
+Vanilla pointer/touch events feed a rolling 80ms velocity window. On release, velocity is projected `280ms` forward to determine the snap target, then `gsap.to()` with `power4.out` animates to it. `power4.out` is strictly monotonic — zero overshoot, guaranteed to stay within rendered content.
+
+### Fluid mask
+
+On drag start, `.dragging` is added to the track, triggering `clip-path: inset(4% round 16px)` on all slide images (snappy 150ms ease-in). On release `.dragging` is removed and the mask returns to `inset(0%)` with a 600ms fluid ease-out. Adjust `DRAG_MASK_INSET` in JS to change the inset percentage.
 
 ### Parallax
-Image containers are 120% wide with `overflow: hidden`. During slide transitions, `requestAnimationFrame` polls the track's computed `transform` and applies an inverse offset to each image (factor: 0.18). No CSS transition on images — parallax is driven purely by JS to avoid settling glitches.
+
+Image containers are 120% wide with `overflow: hidden`. During transitions, `onUpdate` applies an inverse translateX offset to each image (`PARALLAX_FACTOR = 0.18`). Driven entirely by JS — no CSS transition on images.
 
 ### Navigation
-- **Arrow buttons**: Centered on the grid edge. Glassy default state (semi-transparent white + backdrop blur). On hover: solid black background with a duplicate-arrow slide animation (snappy cubic-bezier ease).
-- **Dot indicators**: Centered horizontally on the active slide, 24px from the bottom edge. Semi-transparent white inactive, solid white active.
-- **Mouse drag**: Click and drag to scrub. Velocity and distance thresholds determine whether to advance or snap back.
-- **Touch swipe**: Same mechanics as mouse drag with horizontal/vertical scroll lock.
 
-### Typography
-- Quote: Adobe Clean Display Black, `clamp(28px, 3.5vw, 52px)`, hanging open quote via `text-indent: -0.55em`
-- Attribution name: Adobe Clean Display Bold, 18px
-- Attribution title: Adobe Clean Display Regular, 16px, 70% white
-- CTA: Adobe Clean Display Bold, 15px, solid white pill button, hover inverts to black
+- **Arrows** — centered on the grid edge. Duplicate-arrow slide animation on hover.
+- **Dots** — centered on the active slide, 24px from the bottom edge.
+- **Mouse drag** — velocity + distance threshold determines snap target.
+- **Touch swipe** — same mechanics with horizontal/vertical scroll lock.
 
-## Slide Content
+## Tunable constants
+
+```js
+const REAL_COUNT      = 3;    // number of real slides
+const CLONE_COUNT     = 3;    // clones per side (outermost is safety buffer)
+const GAP             = 8;    // px — matches grid gutter
+const PARALLAX_FACTOR = 0.18; // image parallax intensity
+const TRANSITION_DUR  = 0.6;  // arrow/dot nav duration (s)
+const DRAG_MASK_INSET = 4;    // % — clip-path inset depth while dragging
+```
+
+## Slide content
+
 | # | Quote | Name | Title | CTA |
-|---|-------|------|-------|-----|
+|---|---|---|---|---|
 | 1 | "Firefly helped me unlock the true speed of my creativity." | Noah Spencer | Digital Creator, Studio Games | Create with Firefly |
 | 2 | "I can go from concept to final design in half the time." | Maria Chen | Senior Designer, Brightworks | Explore Photoshop |
 | 3 | "The tools just disappear and I can focus on the art." | James Okafor | Illustrator & Art Director | Try Illustrator |
-
-## Assets
-- `assets/images/image_01.jpg` — Slide 1
-- `assets/images/image_02.jpg` — Slide 2
-- `assets/images/image_03.jpg` — Slide 3
-- `assets/icons/arrow-left.svg` — Left arrow (11x11)
-- `assets/icons/arrow-right.svg` — Right arrow (11x11)
